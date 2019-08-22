@@ -18,14 +18,14 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 */
 
 #include "minimap.h"
-#include <cmath>
 #include "client.h"
 #include "clientmap.h"
 #include "settings.h"
 #include "shader.h"
 #include "mapblock.h"
 #include "client/renderingengine.h"
-
+#include "client/fontengine.h"
+#include "IGUIFont.h"
 
 ////
 //// MinimapUpdateThread
@@ -33,13 +33,11 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 MinimapUpdateThread::~MinimapUpdateThread()
 {
-	for (auto &it : m_blocks_cache) {
+	for (auto &it : m_blocks_cache)
 		delete it.second;
-	}
 
-	for (auto &q : m_update_queue) {
+	for (auto &q : m_update_queue)
 		delete q.data;
-	}
 }
 
 bool MinimapUpdateThread::pushBlockUpdate(v3s16 pos, MinimapMapblock *data)
@@ -129,6 +127,7 @@ void MinimapUpdateThread::getMap(v3s16 pos, s16 size, s16 height)
 		mmpixel.height = 0;
 		mmpixel.n = MapNode(CONTENT_AIR);
 	}
+	data->symbols.clear();
 
 // draw the map
 	v3s16 blockpos;
@@ -165,6 +164,9 @@ void MinimapUpdateThread::getMap(v3s16 pos, s16 size, s16 height)
 				out_pixel.height = inmap_pos.Y + in_pixel.height;
 			}
 		}
+
+		for (MinimapSymbol symbol : block.m_symbols)
+			data->symbols.emplace_back(symbol);
 	}
 }
 
@@ -349,6 +351,7 @@ void Minimap::blitMinimapPixelsToImageSurface(
 {
 	// This variable creation/destruction has a 1% cost on rendering minimap
 	video::SColor tilecolor;
+
 	for (s16 x = 0; x < data->map_size; x++)
 	for (s16 z = 0; z < data->map_size; z++) {
 		MinimapPixel *mmpixel = &data->minimap_scan[x + z * data->map_size];
@@ -429,12 +432,12 @@ v3f Minimap::getYawVec()
 {
 	if (data->minimap_shape_round) {
 		return v3f(
-			std::cos(m_angle * core::DEGTORAD),
-			std::sin(m_angle * core::DEGTORAD),
-			1.0);
+			cos(m_angle * core::DEGTORAD),
+			sin(m_angle * core::DEGTORAD),
+			1.f);
 	}
 
-	return v3f(1.0, 0.0, 1.0);
+	return v3f(1.f, 0.f, 1.f);
 }
 
 scene::SMeshBuffer *Minimap::getMinimapMeshBuffer()
@@ -461,6 +464,10 @@ scene::SMeshBuffer *Minimap::getMinimapMeshBuffer()
 
 void Minimap::drawMinimap()
 {
+	// Font has to be fetched here because fontengine could have changed it
+	// if GUI settings have changed
+	gui::IGUIFont *font = nullptr;
+
 	video::ITexture *minimap_texture = getMinimapTexture();
 	if (!minimap_texture)
 		return;
@@ -473,9 +480,11 @@ void Minimap::drawMinimap()
 	core::matrix4 oldProjMat = driver->getTransform(video::ETS_PROJECTION);
 	core::matrix4 oldViewMat = driver->getTransform(video::ETS_VIEW);
 
-	driver->setViewPort(core::rect<s32>(
+	core::rect<s32> view_rect = core::rect<s32>(
 		screensize.X - size - 10, 10,
-		screensize.X - 10, size + 10));
+		screensize.X - 10, size + 10);
+
+	driver->setViewPort(view_rect);
 	driver->setTransform(video::ETS_PROJECTION, core::matrix4());
 	driver->setTransform(video::ETS_VIEW, core::matrix4());
 
@@ -503,44 +512,30 @@ void Minimap::drawMinimap()
 	driver->setMaterial(material);
 	driver->drawMeshBuffer(m_meshbuffer);
 
-	// Draw overlay
-	video::ITexture *minimap_overlay = data->minimap_shape_round ?
-		data->minimap_overlay_round : data->minimap_overlay_square;
-	material.TextureLayer[0].Texture = minimap_overlay;
-	material.MaterialType = video::EMT_TRANSPARENT_ALPHA_CHANNEL;
-	driver->setMaterial(material);
-	driver->drawMeshBuffer(m_meshbuffer);
+	// Draw markers
 
-	// Draw player marker on minimap
-	if (data->minimap_shape_round) {
-		matrix.setRotationDegrees(core::vector3df(0, 0, 0));
-	} else {
-		matrix.setRotationDegrees(core::vector3df(0, 0, m_angle));
-	}
-
-	material.TextureLayer[0].Texture = data->player_marker;
-	driver->setTransform(video::ETS_WORLD, matrix);
-	driver->setMaterial(material);
-	driver->drawMeshBuffer(m_meshbuffer);
-
-	// Reset transformations
-	driver->setTransform(video::ETS_VIEW, oldViewMat);
-	driver->setTransform(video::ETS_PROJECTION, oldProjMat);
+	// Back to screen viewport. If using square viewport, everything is
+	// anamorphosed.
 	driver->setViewPort(oldViewPort);
 
-	// Draw player markers
 	v2s32 s_pos(screensize.X - size - 10, 10);
-	core::dimension2di imgsize(data->object_marker_red->getOriginalSize());
-	core::rect<s32> img_rect(0, 0, imgsize.Width, imgsize.Height);
+
 	static const video::SColor col(255, 255, 255, 255);
-	static const video::SColor c[4] = {col, col, col, col};
-	f32 sin_angle = std::sin(m_angle * core::DEGTORAD);
-	f32 cos_angle = std::cos(m_angle * core::DEGTORAD);
+	f32 sin_angle = sin(m_angle * core::DEGTORAD);
+	f32 cos_angle = cos(m_angle * core::DEGTORAD);
 	s32 marker_size2 =  0.025 * (float)size;
-	for (std::list<v2f>::const_iterator
-			i = m_active_markers.begin();
-			i != m_active_markers.end(); ++i) {
-		v2f posf = *i;
+	core::rect<s32> clip_rect(
+		view_rect.UpperLeftCorner.X + 1,
+		view_rect.UpperLeftCorner.Y + 1,
+		view_rect.LowerRightCorner.X - 1,
+		view_rect.LowerRightCorner.Y - 1
+	);
+
+	for (MinimapMarker &marker : m_active_markers) {
+		core::dimension2di img_size(marker.texture->getOriginalSize());
+		core::rect<s32> img_rect(0, 0, img_size.Width, img_size.Height);
+
+		v2f posf = marker.pos;
 		if (data->minimap_shape_round) {
 			f32 t1 = posf.X * cos_angle - posf.Y * sin_angle;
 			f32 t2 = posf.X * sin_angle + posf.Y * cos_angle;
@@ -549,55 +544,122 @@ void Minimap::drawMinimap()
 		}
 		posf.X = (posf.X + 0.5) * (float)size;
 		posf.Y = (posf.Y + 0.5) * (float)size;
+
 		core::rect<s32> dest_rect(
 			s_pos.X + posf.X - marker_size2,
 			s_pos.Y + posf.Y - marker_size2,
 			s_pos.X + posf.X + marker_size2,
 			s_pos.Y + posf.Y + marker_size2);
-		driver->draw2DImage(data->object_marker_red, dest_rect,
-			img_rect, &dest_rect, &c[0], true);
+
+		driver->draw2DImage(marker.texture, dest_rect, img_rect, &clip_rect, 0, true);
+
+		// Draw text only if square shape, cannot clip if round
+		if (!data->minimap_shape_round && marker.text != "") {
+			if (!font) {
+				u32 font_size = g_settings->getU32("minimap_font_size");
+				font_size = rangelim(font_size, 2, 72);
+				font = g_fontengine->getFont(font_size, FM_Standard);
+			}
+
+			core::dimension2d<u32> text_dim = font->getDimension(marker.text.c_str());
+			core::rect<s32> text_rect(
+				s_pos.X + posf.X - text_dim.Width / 2,
+				s_pos.Y + posf.Y - text_dim.Height - 10,
+				s_pos.X + posf.X + text_dim.Width / 2,
+				s_pos.Y + posf.Y);
+
+			font->draw(marker.text, text_rect, col, false, true, &clip_rect);
+		}
+	}
+
+	// Draw overlay
+	driver->setViewPort(view_rect);
+
+	video::ITexture *minimap_overlay = data->minimap_shape_round ?
+		data->minimap_overlay_round : data->minimap_overlay_square;
+	material.TextureLayer[0].Texture = minimap_overlay;
+	material.MaterialType = video::EMT_TRANSPARENT_ALPHA_CHANNEL;
+	driver->setMaterial(material);
+	driver->drawMeshBuffer(m_meshbuffer);
+
+	// If round minimap, draw player marker
+	if (!data->minimap_shape_round) {
+		matrix.setRotationDegrees(core::vector3df(0, 0, m_angle));
+		material.TextureLayer[0].Texture = data->player_marker;
+
+		driver->setTransform(video::ETS_WORLD, matrix);
+		driver->setMaterial(material);
+		driver->drawMeshBuffer(m_meshbuffer);
+	}
+
+	// Reset transformations
+	driver->setTransform(video::ETS_VIEW, oldViewMat);
+	driver->setTransform(video::ETS_PROJECTION, oldProjMat);
+	driver->setViewPort(oldViewPort);
+}
+
+void Minimap::addMarker(v3s16 pos, std::string texture, std::string text)
+{
+	video::IImage *minimap_mask = data->minimap_shape_round ?
+		data->minimap_mask_round : data->minimap_mask_square;
+	MinimapMarker marker;
+
+	pos -= data->pos - v3s16(data->map_size / 2, data->scan_height / 2,
+		data->map_size / 2);
+
+	if (pos.X >= 0 && pos.X <= data->map_size &&
+			pos.Y >= 0 && pos.Y <= data->scan_height &&
+			pos.Z >= 0 && pos.Z <= data->map_size) {
+		pos.X = ((float)pos.X / data->map_size) * MINIMAP_MAX_SX;
+		pos.Z = (1.0f - (float)pos.Z / data->map_size) * MINIMAP_MAX_SY;
+		const video::SColor &mask_col = minimap_mask->getPixel(pos.X, pos.Z);
+		if (!mask_col.getAlpha())
+			return;
+
+		marker.pos.X = (float)pos.X / (float)MINIMAP_MAX_SX - 0.5;
+		marker.pos.Y = (float)pos.Z / (float)MINIMAP_MAX_SY - 0.5;
+		// TODO: check behavior if no texture found
+		marker.texture = m_tsrc->getTexture(texture);
+
+		// std::string to wstring conversion
+		wchar_t *textw = new wchar_t[text.size() + sizeof(wchar_t)];
+		const char *data = &text[0];
+		mbsrtowcs(textw, &data, text.size(), NULL);
+		textw[text.size()] = L'\0';
+		marker.text = textw;
+		delete textw;
+
+		m_active_markers.emplace_back(marker);
 	}
 }
 
 void Minimap::updateActiveMarkers()
 {
-	video::IImage *minimap_mask = data->minimap_shape_round ?
-		data->minimap_mask_round : data->minimap_mask_square;
-
 	const std::list<Nametag *> &nametags = client->getCamera()->getNametags();
 
 	m_active_markers.clear();
 
 	for (Nametag *nametag : nametags) {
-		v3s16 pos = floatToInt(nametag->parent_node->getPosition() +
+		v3s16 pos = floatToInt(nametag->parent_node->getAbsolutePosition() +
 			intToFloat(client->getCamera()->getOffset(), BS), BS);
-		pos -= data->pos - v3s16(data->map_size / 2,
-				data->scan_height / 2,
-				data->map_size / 2);
-		if (pos.X < 0 || pos.X > data->map_size ||
-				pos.Y < 0 || pos.Y > data->scan_height ||
-				pos.Z < 0 || pos.Z > data->map_size) {
-			continue;
-		}
-		pos.X = ((float)pos.X / data->map_size) * MINIMAP_MAX_SX;
-		pos.Z = ((float)pos.Z / data->map_size) * MINIMAP_MAX_SY;
-		const video::SColor &mask_col = minimap_mask->getPixel(pos.X, pos.Z);
-		if (!mask_col.getAlpha()) {
-			continue;
-		}
 
-		m_active_markers.emplace_back(((float)pos.X / (float)MINIMAP_MAX_SX) - 0.5,
-			(1.0 - (float)pos.Z / (float)MINIMAP_MAX_SY) - 0.5);
+		// TODO: Use a texture store ?
+		addMarker(pos, "object_marker_red.png", "");
+
 	}
+
+	// Place map symbols as markers
+	// TODO: Use a texture store?
+	for (MinimapSymbol symbol : data->symbols)
+		addMarker(symbol.pos, symbol.texture, symbol.text);
 }
 
 ////
 //// MinimapMapblock
 ////
 
-void MinimapMapblock::getMinimapNodes(VoxelManipulator *vmanip, const v3s16 &pos)
+void MinimapMapblock::getMinimapNodes(VoxelManipulator *vmanip, const v3s16 &pos, Map &map)
 {
-
 	for (s16 x = 0; x < MAP_BLOCKSIZE; x++)
 	for (s16 z = 0; z < MAP_BLOCKSIZE; z++) {
 		s16 air_count = 0;
@@ -607,12 +669,31 @@ void MinimapMapblock::getMinimapNodes(VoxelManipulator *vmanip, const v3s16 &pos
 		for (s16 y = MAP_BLOCKSIZE -1; y >= 0; y--) {
 			v3s16 p(x, y, z);
 			MapNode n = vmanip->getNodeNoEx(pos + p);
+
 			if (!surface_found && n.getContent() != CONTENT_AIR) {
 				mmpixel->height = y;
 				mmpixel->n = n;
 				surface_found = true;
 			} else if (n.getContent() == CONTENT_AIR) {
 				air_count++;
+			}
+
+			if (n.getContent() != CONTENT_UNKNOWN &&
+					n.getContent() != CONTENT_IGNORE &&
+					n.getContent() != CONTENT_AIR) {
+				v3s16 pp = pos + p;
+				NodeMetadata *meta = map.getNodeMetadata(pp);
+
+				//std::cout << (meta != NULL) << std::endl;
+
+				if (meta != NULL && !meta->empty() && meta->contains("minimap_symbol")) {
+					MinimapSymbol symbol;
+					symbol.pos = pp;
+					symbol.texture = meta->getString("minimap_symbol");
+					symbol.text = meta->getString("minimap_text");
+					std::cout << symbol.text << std::endl;
+					m_symbols.emplace_back(symbol);
+				}
 			}
 		}
 
