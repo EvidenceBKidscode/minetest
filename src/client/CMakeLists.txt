@@ -57,6 +57,7 @@ set(client_SRCS
 	${CMAKE_CURRENT_SOURCE_DIR}/shader.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/sky.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/tile.cpp
+	${CMAKE_CURRENT_SOURCE_DIR}/water.cpp
 	${CMAKE_CURRENT_SOURCE_DIR}/wieldmesh.cpp
 	PARENT_SCOPE
 )
